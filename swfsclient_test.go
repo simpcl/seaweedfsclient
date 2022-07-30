@@ -70,3 +70,26 @@ func verifyDownloadFile(t *testing.T, fid string) (data []byte) {
 	require.NotZero(t, len(data))
 	return
 }
+
+func TestUploadLookupserverDeleteFile(t *testing.T) {
+	_, fp, err := sc.UploadFile(SmallFile, "", "")
+	require.Nil(t, err)
+
+	_, err = sc.LookupServerByFileID(fp.FileID, nil, true)
+	require.Nil(t, err)
+
+	// verify by downloading
+	downloaded := verifyDownloadFile(t, fp.FileID)
+	fh, err := os.Open(SmallFile)
+	require.Nil(t, err)
+	allContent, _ := ioutil.ReadAll(fh)
+	require.Nil(t, fh.Close())
+	require.EqualValues(t, downloaded, allContent)
+
+	// try to looking up
+	_, err = sc.LookupFileID(fp.FileID, nil, true)
+	require.Nil(t, err)
+
+	// delete file
+	require.Nil(t, sc.DeleteFile(fp.FileID, nil))
+}

@@ -176,7 +176,7 @@ func (c *SwfsClient) Assign(args url.Values) (result *AssignResult, err error) {
 }
 
 // Submit file directly to master.
-func (c *SwfsClient) Submit(filePath string, collection string, ttl string) (result *SubmitResult, err error) {
+func (c *SwfsClient) Submit(filePath string, collection, ttl string) (result *SubmitResult, err error) {
 	f, err := NewSwFile(filePath)
 	if err != nil {
 		return
@@ -205,24 +205,49 @@ func (c *SwfsClient) UploadSwFile(f *SwFile) (assignResult *AssignResult, err er
 	base := *c.master
 	base.Host = assignResult.URL
 
+	args := normalize(nil, f.Collection, f.TTL)
+	if f.ModTime != 0 {
+		args.Set("ts", strconv.FormatInt(f.ModTime, 10))
+	}
+
+	f.FileID = assignResult.FileID
+	if len(f.MimeType) == 0 {
+		f.MimeType = "application/octet-stream"
+	}
+
 	// do upload
 	var v []byte
 	v, _, err = c.client.upload(
-		encodeURI(base, assignResult.FileID, nil),
+		encodeURI(base, f.FileID, args),
 		f.FileName, io.LimitReader(f.Reader, c.maxFileSize),
-		"application/octet-stream")
+		f.MimeType)
 	if err != nil {
 		return
 	}
+
 	// parsing response data
 	uploadResult := UploadResult{}
 	if err = json.Unmarshal(v, &uploadResult); err != nil {
 		return
 	}
 	if f.FileSize != uploadResult.Size {
-		errors.New("wrong upload size")
+		err = errors.New("wrong upload size")
+		return
+	}
+	f.Etag = uploadResult.Etag
+
+	return
+}
+
+func (c *SwfsClient) UploadFile(filePath string, collection, ttl string) (assignResult *AssignResult, fp *SwFile, err error) {
+	fp, err = NewSwFile(filePath)
+	if err != nil {
+		return
 	}
 
+	fp.Collection, fp.TTL = collection, ttl
+	assignResult, err = c.UploadSwFile(fp)
+	_ = fp.Close()
 	return
 }
 
