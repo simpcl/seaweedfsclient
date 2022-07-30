@@ -176,7 +176,7 @@ func (c *SwfsClient) Assign(args url.Values) (result *AssignResult, err error) {
 }
 
 // Submit file directly to master.
-func (c *SwfsClient) Submit(filePath string, collection, ttl string) (result *SubmitResult, err error) {
+func (c *SwfsClient) Submit(filePath string, collection string, ttl string) (result *SubmitResult, err error) {
 	f, err := NewSwFile(filePath)
 	if err != nil {
 		return
