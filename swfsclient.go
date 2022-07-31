@@ -9,12 +9,16 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/patrickmn/go-cache"
 )
 
 type SwfsClient struct {
-	master      *url.URL
-	client      *httpClient
-	maxFileSize int64
+	master               *url.URL
+	client               *httpClient
+	maxFileSize          int64
+	volumeLocationsCache *cache.Cache
 }
 
 func NewSwfsClient(masterURL string, client *http.Client, fileSizeLimit int64) (c *SwfsClient, err error) {
@@ -24,9 +28,10 @@ func NewSwfsClient(masterURL string, client *http.Client, fileSizeLimit int64) (
 	}
 
 	c = &SwfsClient{
-		master:      u,
-		client:      newHTTPClient(client),
-		maxFileSize: fileSizeLimit,
+		master:               u,
+		client:               newHTTPClient(client),
+		maxFileSize:          fileSizeLimit,
+		volumeLocationsCache: cache.New(5*time.Minute, 10*time.Minute),
 	}
 
 	return
@@ -65,6 +70,21 @@ func (c *SwfsClient) DeleteCollection(args url.Values) (err error) {
 	return
 }
 
+func (c *SwfsClient) getVolumeIDFromFileID(fileID string) (string, error) {
+	var parts []string
+	if strings.Contains(fileID, ",") {
+		parts = strings.Split(fileID, ",")
+	} else {
+		parts = strings.Split(fileID, "/")
+	}
+
+	if len(parts) != 2 { // wrong file id format
+		return "", errors.New("Invalid fileID " + fileID)
+	}
+
+	return parts[0], nil
+}
+
 // Lookup volume ID.
 func (c *SwfsClient) Lookup(volID string, args url.Values) (result *LookupResult, err error) {
 	result, err = c.doLookup(volID, args)
@@ -90,18 +110,13 @@ func (c *SwfsClient) doLookup(volID string, args url.Values) (result *LookupResu
 
 // LookupServerByFileID lookup server by file id.
 func (c *SwfsClient) LookupServerByFileID(fileID string, args url.Values, readonly bool) (server string, err error) {
-	var parts []string
-	if strings.Contains(fileID, ",") {
-		parts = strings.Split(fileID, ",")
-	} else {
-		parts = strings.Split(fileID, "/")
+	var volumeID string
+	volumeID, err = c.getVolumeIDFromFileID(fileID)
+	if err != nil {
+		return
 	}
 
-	if len(parts) != 2 { // wrong file id format
-		return "", errors.New("Invalid fileID " + fileID)
-	}
-
-	lookup, lookupError := c.Lookup(parts[0], args)
+	lookup, lookupError := c.Lookup(volumeID, args)
 	if lookupError != nil {
 		err = lookupError
 	} else if len(lookup.VolumeLocations) == 0 {
@@ -129,6 +144,29 @@ func (c *SwfsClient) LookupFileID(fileID string, args url.Values, readonly bool)
 		fullURL = base.String()
 	}
 	return
+}
+
+func (c *SwfsClient) GetVolumeLocationsFromFileID(fileID string, args url.Values, withCache bool) (*VolumeLocations, error) {
+	volumeID, err := c.getVolumeIDFromFileID(fileID)
+	if err != nil {
+		return nil, err
+	}
+
+	if withCache {
+		if vls, found := c.volumeLocationsCache.Get(volumeID); found {
+			return vls.(*VolumeLocations), nil
+		}
+	}
+
+	lookupResult, lookupError := c.doLookup(volumeID, args)
+	if lookupError != nil {
+		return nil, lookupError
+	} else if len(lookupResult.VolumeLocations) == 0 {
+		return nil, ErrFileNotFound
+	}
+	c.volumeLocationsCache.Set(volumeID, &lookupResult.VolumeLocations, cache.DefaultExpiration)
+
+	return &lookupResult.VolumeLocations, nil
 }
 
 // GC force Garbage Collection.
@@ -252,19 +290,44 @@ func (c *SwfsClient) UploadFile(filePath string, collection, ttl string) (assign
 }
 
 // Download file by id.
-func (c *SwfsClient) Download(fileID string, args url.Values, callback func(io.Reader) error) (fileName string, err error) {
-	fileURL, err := c.LookupFileID(fileID, args, true)
-	if err == nil {
+func (c *SwfsClient) Download(fileID string, args url.Values, callback func(io.Reader) error) (string, error) {
+	var withCache = true
+	var err error = nil
+	for retry := 2; retry > 0; retry-- {
+		var vls *VolumeLocations = nil
+		var fileName string
+		vls, err = c.GetVolumeLocationsFromFileID(fileID, args, withCache)
+		if err != nil {
+			return "", err
+		}
+
+		fileURL := fmt.Sprintf("http://%s/%s", vls.RandomPickForRead().PublicURL, fileID)
 		fileName, err = c.client.download(fileURL, callback)
+		if err == nil {
+			return fileName, nil
+		}
+		withCache = false
 	}
-	return
+	return "", err
 }
 
 // DeleteFile by id.
-func (c *SwfsClient) DeleteFile(fileID string, args url.Values) (err error) {
-	fileURL, err := c.LookupFileID(fileID, args, false)
-	if err == nil {
+func (c *SwfsClient) DeleteFile(fileID string, args url.Values) error {
+	var withCache = true
+	var err error = nil
+	for retry := 2; retry > 0; retry-- {
+		var vls *VolumeLocations = nil
+		vls, err = c.GetVolumeLocationsFromFileID(fileID, args, withCache)
+		if err != nil {
+			return err
+		}
+
+		fileURL := fmt.Sprintf("http://%s/%s", vls.Head().URL, fileID)
 		_, err = c.client.delete(fileURL)
+		if err == nil {
+			return nil
+		}
+		withCache = false
 	}
-	return
+	return err
 }
